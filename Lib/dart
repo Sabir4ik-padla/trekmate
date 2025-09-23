@@ -40,7 +40,7 @@ class _MapScreenState extends State<MapScreen> {
   String _selectedPlace = "Gunashli";
   String _temperature = "21°C";
 
-  final String _apiKey = "AIzaSyCQneV-LFxay6qT7bHKuy_84GJWsxu1WeY";
+  final String _apiKey = "google key";
 
   @override
   void initState() {
