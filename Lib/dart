@@ -1,0 +1,306 @@
+Main Dart 
+
+import 'dart:convert';
+import 'package:flutter/material.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:http/http.dart' as http;
+import 'package:flutter/services.dart' show rootBundle;
+
+void main() {
+  runApp(const MyApp());
+}
+
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData.dark(),
+      home: const MapScreen(),
+    );
+  }
+}
+
+class MapScreen extends StatefulWidget {
+  const MapScreen({super.key});
+
+  @override
+  State<MapScreen> createState() => _MapScreenState();
+}
+
+class _MapScreenState extends State<MapScreen> {
+  late GoogleMapController _mapController;
+
+  LatLng? _currentPosition;
+  final Set<Marker> _markers = {};
+  final Set<Polyline> _polylines = {};
+  String _selectedPlace = "Gunashli";
+  String _temperature = "21°C";
+
+  final String _apiKey = "AIzaSyCQneV-LFxay6qT7bHKuy_84GJWsxu1WeY";
+
+  @override
+  void initState() {
+    super.initState();
+    _setCurrentLocation();
+    _loadAttractions();
+  }
+
+  Future<void> _setCurrentLocation() async {
+    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) return;
+
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) return;
+    }
+    if (permission == LocationPermission.deniedForever) return;
+
+    final position = await Geolocator.getCurrentPosition();
+    setState(() {
+      _currentPosition = LatLng(position.latitude, position.longitude);
+      _markers.add(Marker(
+        markerId: const MarkerId("me"),
+        position: _currentPosition!,
+        infoWindow: const InfoWindow(title: "Вы здесь"),
+        icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
+      ));
+    });
+
+    _mapController.animateCamera(
+      CameraUpdate.newLatLngZoom(_currentPosition!, 14),
+    );
+  }
+
+  Future<void> _loadAttractions() async {
+    final data = await rootBundle.loadString('assets/attractions.json');
+    final jsonResult = jsonDecode(data);
+
+    for (var feature in jsonResult['features']) {
+      final coords = feature['geometry']['coordinates'];
+      final props = feature['properties'];
+
+      final LatLng position = LatLng(coords[1], coords[0]);
+
+      _markers.add(Marker(
+        markerId: MarkerId(props['name']),
+        position: position,
+        infoWindow: InfoWindow(title: props['name']),
+        onTap: () {
+          setState(() {
+            _selectedPlace = props['name'];
+          });
+          _buildRoute(position, props['name']);
+        },
+      ));
+    }
+
+    setState(() {});
+  }
+
+  Future<void> _buildRoute(LatLng destination, String name) async {
+    if (_currentPosition == null) return;
+
+    final points = await _getRouteCoordinates(_currentPosition!, destination);
+
+    setState(() {
+      _polylines.clear();
+      _polylines.add(
+        Polyline(
+          polylineId: PolylineId("route_to_$name"),
+          color: Colors.blue,
+          width: 5,
+          points: points,
+        ),
+      );
+    });
+
+    _mapController.animateCamera(
+      CameraUpdate.newLatLngBounds(
+        _boundsFromLatLngList([_currentPosition!, destination]),
+        50,
+      ),
+    );
+  }
+
+  Future<List<LatLng>> _getRouteCoordinates(
+      LatLng origin, LatLng destination) async {
+    final url = Uri.parse(
+      'https://maps.googleapis.com/maps/api/directions/json?origin=${origin.latitude},${origin.longitude}&destination=${destination.latitude},${destination.longitude}&mode=walking&key=$_apiKey',
+    );
+
+    final response = await http.get(url);
+    final data = jsonDecode(response.body);
+
+    if (data['status'] == 'OK') {
+      final points = data['routes'][0]['overview_polyline']['points'];
+      return _decodePolyline(points);
+    } else {
+      throw Exception("Не удалось построить маршрут: ${data['status']}");
+    }
+  }
+
+  List<LatLng> _decodePolyline(String polyline) {
+    List<LatLng> points = [];
+    int index = 0, len = polyline.length;
+    int lat = 0, lng = 0;
+
+    while (index < len) {
+      int b, shift = 0, result = 0;
+      do {
+        b = polyline.codeUnitAt(index++) - 63;
+        result |= (b & 0x1f) << shift;
+        shift += 5;
+      } while (b >= 0x20);
+      int dlat = ((result & 1) != 0 ? ~(result >> 1) : (result >> 1));
+      lat += dlat;
+
+      shift = 0;
+      result = 0;
+      do {
+        b = polyline.codeUnitAt(index++) - 63;
+        result |= (b & 0x1f) << shift;
+        shift += 5;
+      } while (b >= 0x20);
+      int dlng = ((result & 1) != 0 ? ~(result >> 1) : (result >> 1));
+      lng += dlng;
+
+      points.add(LatLng(lat / 1E5, lng / 1E5));
+    }
+    return points;
+  }
+
+  LatLngBounds _boundsFromLatLngList(List<LatLng> list) {
+    double x0 = list.first.latitude, x1 = list.first.latitude;
+    double y0 = list.first.longitude, y1 = list.first.longitude;
+
+    for (LatLng latLng in list) {
+      if (latLng.latitude > x1) x1 = latLng.latitude;
+      if (latLng.latitude < x0) x0 = latLng.latitude;
+      if (latLng.longitude > y1) y1 = latLng.longitude;
+      if (latLng.longitude < y0) y0 = latLng.longitude;
+    }
+
+    return LatLngBounds(
+      southwest: LatLng(x0, y0),
+      northeast: LatLng(x1, y1),
+    );
+  }
+
+  int _selectedIndex = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Stack(
+        children: [
+          GoogleMap(
+            onMapCreated: (controller) => _mapController = controller,
+            initialCameraPosition: const CameraPosition(
+              target: LatLng(40.4093, 49.8671), // Баку центр
+              zoom: 13.0,
+            ),
+            myLocationEnabled: true,
+            myLocationButtonEnabled: true,
+            zoomGesturesEnabled: true,
+            scrollGesturesEnabled: true,
+            rotateGesturesEnabled: true,
+            tiltGesturesEnabled: true,
+            markers: _markers,
+            polylines: _polylines,
+          ),
+
+          // 🔍 Поиск сверху
+          Positioned(
+            top: 50,
+            left: 20,
+            right: 20,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 15),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(30),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.2),
+                    blurRadius: 5,
+                  )
+                ],
+              ),
+              child: const TextField(
+                decoration: InputDecoration(
+                  hintText: "Поиск достопримечательностей",
+                  border: InputBorder.none,
+                  icon: Icon(Icons.search, color: Colors.grey),
+                ),
+              ),
+            ),
+          ),
+
+          // 📍 Карточка снизу (место + погода)
+          Positioned(
+            bottom: 80,
+            left: 0,
+            right: 0,
+            child: Container(
+              margin: const EdgeInsets.symmetric(horizontal: 20),
+              padding: const EdgeInsets.all(15),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(20),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.2),
+                    blurRadius: 6,
+                  )
+                ],
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    _selectedPlace,
+                    style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.black),
+                  ),
+                  Row(
+                    children: [
+                      const Icon(Icons.wb_sunny, color: Colors.orange),
+                      const SizedBox(width: 5),
+                      Text(_temperature,
+                          style: const TextStyle(color: Colors.black)),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+
+      // ⭐ Нижнее меню
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _selectedIndex,
+        selectedItemColor: Colors.blueAccent,
+        unselectedItemColor: Colors.grey,
+        onTap: (index) {
+          setState(() => _selectedIndex = index);
+        },
+        items: const [
+          BottomNavigationBarItem(
+              icon: Icon(Icons.star_border), label: "Любимое"),
+          BottomNavigationBarItem(
+              icon: Icon(Icons.headset_mic), label: "AI Гид"),
+          BottomNavigationBarItem(
+              icon: Icon(Icons.settings), label: "Настройки"),
+        ],
+      ),
+    );
+  }
+}
